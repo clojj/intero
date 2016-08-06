@@ -1,7 +1,9 @@
-resolver: lts-5.16
+resolver: nightly-2016-07-29
 packages:
 - '.'
-extra-deps: []
+- nanomsg-haskell
+extra-deps:
+- binary-conduit-1.2.4.1
 flags: {}
 extra-package-dbs: []
 nix:
