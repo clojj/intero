@@ -80,7 +80,8 @@ executable intero
     containers,
     time,
     ghc-syb-utils,
-    nanomsg-haskell
+    nanomsg-haskell,
+    split
 
   if impl(ghc>=8.0.1)
     build-depends:

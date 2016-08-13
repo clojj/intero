@@ -129,17 +129,28 @@ import           GHC.IO.Handle               (hFlushAll)
 import           GHC.TopHandler              (topHandler)
 
 -- import           Control.Concurrent (forkIO, MVar, newEmptyMVar, putMVar, takeMVar)
+import           Common
+import           Data.List.Split
 import qualified GHC.SYB.Utils               as SYBU
 import           Nanomsg
 
-import           Common
 
-type NanoCommand = (String, String -> GHCi String)
+
+type NanoCmd = String -> GHCi String
+type NanoCommand = (String, NanoCmd)
 
 nanoCommands :: [NanoCommand]
 nanoCommands = [
   ("check",     checkModule')
   ]
+
+lookupNanoCommand :: String -> (NanoCmd, [String])
+-- TODO lookup
+lookupNanoCommand s =
+  let
+    cmd : param1 : _ = splitOn " " s
+  in
+    (checkModule', [param1])
 
 exit' :: Socket Rep -> Endpoint -> String -> GHCi ()
 exit' socket endpoint _ = liftIO $ do
@@ -163,9 +174,12 @@ nanoServer = do
 
               when (cmd == "quit") $ quit ""
 
-              -- TODO dispatch commands
+              -- TODO lookup + params
+              let (command, p1 : rest) = lookupNanoCommand cmd
+              liftIO $ putStrLn $ "parameter: " ++ p1
+
               -- TODO check result + behaviour of handler'
-              result <- runOneCommand' handler' checkModule' cmd
+              result <- runOneCommand' handler' command p1
 
               liftIO $ send socket $ BS.pack result
 
