@@ -89,7 +89,11 @@ import           Panic hiding ( showException )
 import           Util
 
 -- Haskell Libraries
-import           NanoCommands
+import           Nanomsg
+import           Control.Concurrent (forkIO, MVar, newEmptyMVar, putMVar, takeMVar)
+import qualified GHC.SYB.Utils as SYBU
+import           GHC.Conc (setNumCapabilities, getNumProcessors)
+
 import           System.Console.Haskeline as Haskeline
 
 import           Control.Applicative hiding (empty)
@@ -654,11 +658,57 @@ runGHCi paths maybe_exprs = do
   modifyGHCiState (\s -> s { rdrNamesInScope = names })
 
   case maybe_exprs of
-        Nothing -> nanoServer
-{-          do
+        Nothing ->
+          do
+            cmd_in <- liftIO newEmptyMVar
+            cmd_out <- liftIO newEmptyMVar
+
+            -- bind nanomsg socket and save into GHCiState
+            socket <- liftIO $ socket Rep
+            liftIO $ bind socket "ipc:///tmp/intero.socket"
+
+            st <- getGHCiState
+            setGHCiState st { cmd_input = cmd_in,
+                              cmd_output = cmd_out,
+                              nano_socket = socket}
+
+            liftIO $ putStrLn $ "is TTY: " ++ show is_tty
+            prmpt <- if (is_tty && show_prompt)
+              then mkPrompt
+              else return "in>"
+            
+            -- let nanomsg_server = nanoServer socket cmd_in cmd_out
+            --     stdin_server = stdinServer stdin cmd_in cmd_out prmpt
+              
+            -- liftIO $ case is_tty of 
+            --   True -> do
+            --     forkIO $ forever $ stdin_server
+            --     return ()
+            --   _ -> do
+            --       forkIO $ forever stdin_server
+            --       forkIO $ forever nanomsg_server
+            --       return ()
+
+            m <- liftIO getNumProcessors
+            liftIO $ print $ "num proc " ++ show m
+
+            _ <- liftIO $ forkIO $ forever $ do
+                  putStrLn prmpt
+                  line <- getLine
+                  putStrLn $ "stdin was:\n" ++ line 
+                  putMVar cmd_in line
+
+            _ <- liftIO $ forkIO $ forever $ do
+                  msg <- recv socket
+                  let cmd = (BS.unpack msg)
+                  putStrLn $ "nanoServer received:\n" ++ cmd 
+                  putMVar cmd_in cmd
+                  result <- takeMVar cmd_out
+                  send socket $ BS.pack result 
+
             -- enter the interactive loop
+            _ <- liftIO $ putStrLn "entering input-loop"
             runGHCiInput $ runCommands $ nextInputLine show_prompt is_tty
--}
         Just exprs -> do
             -- just evaluate the expression we were given
             enqueueCommands exprs
@@ -678,6 +728,13 @@ runGHCi paths maybe_exprs = do
   -- and finally, exit
   liftIO $ when (verbosity dflags > 0) $ putStrLn "Leaving GHCi."
 
+nextInputCmd :: MVar String -> GHCi String
+nextInputCmd cmd_input= do
+        liftIO $ putStrLn "nextInputCmd>"
+        cmd <- liftIO $ takeMVar cmd_input
+        -- incrementLineNo
+        return cmd
+
 runGHCiInput :: InputT GHCi a -> GHCi a
 runGHCiInput f = do
     dflags <- getDynFlags
@@ -692,14 +749,60 @@ runGHCiInput f = do
 -- | How to get the next input line from the user
 nextInputLine :: Bool -> Bool -> InputT GHCi (Maybe String)
 nextInputLine show_prompt is_tty
-  | is_tty = do
-    prmpt <- if show_prompt then lift mkPrompt else return ""
-    r <- getInputLine prmpt
-    incrementLineNo
-    return r
-  | otherwise = do
-    when show_prompt $ lift mkPrompt >>= liftIO . putStr
-    fileLoop stdin
+  -- | is_tty = do
+  --   prmpt <- if show_prompt then lift mkPrompt else return ""
+  --   r <- getInputLine prmpt
+  --   incrementLineNo
+  --   return r
+  -- | otherwise = do
+    = do
+        -- when show_prompt $ lift mkPrompt >>= liftIO . putStr
+        _ <- liftIO $ putStrLn "nextInputLine>"
+        st <- lift getGHCiState
+        let cmdin = cmd_input st
+        cmd <- liftIO $ takeMVar cmdin
+        incrementLineNo
+        return (Just cmd)
+
+stdinServer :: Handle -> MVar String -> MVar String -> String -> IO ()
+stdinServer stdin cmd_in cmd_out prmpt = do
+  putStrLn prmpt
+  line <- getLineFromHandle stdin
+  case line of
+    Just l -> do
+      putStrLn $ "stdin was:\n" ++ l 
+      putMVar cmd_in l
+    Nothing -> putMVar cmd_in ":quit"
+
+getLineFromHandle :: Handle -> IO (Maybe String)
+getLineFromHandle hdl = do
+   l <- tryIO $ hGetLine hdl
+   case l of
+        Left e | isEOFError e              -> return Nothing
+               | -- as we share stdin with the program, the program
+                 -- might have already closed it, so we might get a
+                 -- handle-closed exception. We therefore catch that
+                 -- too.
+                 isIllegalOperation e      -> return Nothing
+               | InvalidArgument <- etype  -> return Nothing
+               | otherwise                 -> liftIO $ ioError e
+                where etype = ioeGetErrorType e
+                -- treat InvalidArgument in the same way as EOF:
+                -- this can happen if the user closed stdin, or
+                -- perhaps did getContents which closes stdin at
+                -- EOF.
+        Right l' -> do
+           return (Just l')
+
+nanoServer :: Socket Rep -> MVar String -> MVar String -> IO ()
+nanoServer socket cmd_in cmd_out = do
+  msg <- recv socket
+  let cmd = (BS.unpack msg) ++ "\n"
+  putStrLn $ "nanoServer received:\n" ++ cmd 
+  putMVar cmd_in cmd
+  result <- takeMVar cmd_out
+  send socket $ BS.pack result 
+
 
 -- NOTE: We only read .ghci files if they are owned by the current user,
 -- and aren't world writable.  Otherwise, we could be accidentally
@@ -1474,16 +1577,20 @@ checkModule m = do
   ok <- handleSourceError (\e -> GHC.printException e >> return False) $ do
           r <- GHC.typecheckModule =<< GHC.parseModule =<< GHC.getModSummary modl
           dflags <- getDynFlags
-          liftIO $ putStrLn $ showSDoc dflags $
-           case GHC.moduleInfo r of
-             cm | Just scope <- GHC.modInfoTopLevelScope cm ->
-                let
-                    (loc, glob) = ASSERT( all isExternalName scope )
-                                  partition ((== modl) . GHC.moduleName . GHC.nameModule) scope
-                in
-                        (text "global names: " <+> ppr glob) $$
-                        (text "local  names: " <+> ppr loc)
-             _ -> empty
+
+          let result = SYBU.showData SYBU.Parser 2 (GHC.pm_parsed_source (GHC.tm_parsed_module r))
+              names = showSDoc dflags (case GHC.moduleInfo r of
+                        cm | Just scope <- GHC.modInfoTopLevelScope cm ->
+                            let
+                                (loc, glob) = ASSERT( all isExternalName scope )
+                                              partition ((== modl) . GHC.moduleName . GHC.nameModule) scope
+                            in
+                                    (text "global names: " <+> ppr glob) $$
+                                    (text "local  names: " <+> ppr loc)
+                        _ -> empty)
+
+          st <- lift getGHCiState
+          liftIO $ putMVar (cmd_output st) ("@checkModule: " ++ result ++ "\n" ++ names)
           return True
   afterLoad (successIf ok) False
 

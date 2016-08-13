@@ -677,7 +677,7 @@ runGHCi paths maybe_exprs = do
 
   -- and finally, exit
   liftIO $ when (verbosity dflags > 0) $ putStrLn "Leaving GHCi."
-
+{-
 runGHCiInput :: InputT GHCi a -> GHCi a
 runGHCiInput f = do
     dflags <- getDynFlags
@@ -700,7 +700,7 @@ nextInputLine show_prompt is_tty
   | otherwise = do
     when show_prompt $ lift mkPrompt >>= liftIO . putStr
     fileLoop stdin
-
+-}
 -- NOTE: We only read .ghci files if they are owned by the current user,
 -- and aren't world writable.  Otherwise, we could be accidentally
 -- running code planted by a malicious third party.
