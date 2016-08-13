@@ -148,9 +148,14 @@ lookupNanoCommand :: String -> (NanoCmd, [String])
 -- TODO lookup
 lookupNanoCommand s =
   let
-    cmd : param1 : _ = splitOn " " s
+    cmd : parameters = splitOn " " s
+    find s l =
+      case l of
+        (c, f) : xs -> if c == s then f else find s xs
+        [] -> undefined
+
   in
-    (checkModule', [param1])
+    (find cmd nanoCommands, parameters)
 
 exit' :: Socket Rep -> Endpoint -> String -> GHCi ()
 exit' socket endpoint _ = liftIO $ do
@@ -174,9 +179,9 @@ nanoServer = do
 
               when (cmd == "quit") $ quit ""
 
-              -- TODO lookup + params
+              -- TODO pass all parameters
               let (command, p1 : rest) = lookupNanoCommand cmd
-              liftIO $ putStrLn $ "parameter: " ++ p1
+              liftIO $ putStrLn $ "command: " ++ cmd ++ "   p1: " ++ p1
 
               -- TODO check result + behaviour of handler'
               result <- runOneCommand' handler' command p1
@@ -221,9 +226,11 @@ checkModule' m = do
                         _ -> empty)
 
           return $ "@checkModule: " ++ result ++ "\n" ++ names
-  case result of
-    "Error" -> afterLoad' (Failed, result) False
-    _ -> afterLoad' (Succeeded, result) False
+
+  -- case result of
+    -- "Error" -> afterLoad' (Failed, result) False
+    -- _ -> afterLoad' (Succeeded, result) False
+  afterLoad' (Succeeded, result) False
 
 afterLoad' :: (SuccessFlag, String)
           -> Bool         -- keep the remembered_ctx, as far as possible (:reload)
